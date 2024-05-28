@@ -156,7 +156,6 @@ typedef struct {
     ngx_http_upstream_conf_t       upstream;
     size_t                         hmux_header_packet_buffer_size_conf;
     size_t                         max_hmux_data_packet_size_conf;
-    ngx_flag_t                     hmux_set_header_x_forwarded_for;
     ngx_array_t                   *hmux_lengths;
     ngx_array_t                   *hmux_values;
 #if (NGX_HTTP_CACHE)
@@ -249,8 +248,6 @@ static char *ngx_hmux_upstream_max_fails_unsupported(ngx_conf_t *cf,
         ngx_command_t *cmd, void *conf);
 static char *ngx_hmux_upstream_fail_timeout_unsupported(ngx_conf_t *cf,
         ngx_command_t *cmd, void *conf);
-static ngx_int_t ngx_hmux_get_x_forwarded_for_value(ngx_http_request_t *r,
-        ngx_str_t *v, uintptr_t data);
 
 static void *ngx_hmux_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_hmux_merge_loc_conf(ngx_conf_t *cf, void *parent,
@@ -576,13 +573,6 @@ static ngx_command_t  ngx_hmux_commands[] = {
         NGX_HTTP_LOC_CONF_OFFSET,
         offsetof(ngx_hmux_loc_conf_t, upstream.ignore_headers),
         &ngx_http_upstream_ignore_headers_masks},
-
-    { ngx_string("hmux_x_forwarded_for"),
-        NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-        ngx_conf_set_flag_slot,
-        NGX_HTTP_LOC_CONF_OFFSET,
-        offsetof(ngx_hmux_loc_conf_t, hmux_set_header_x_forwarded_for),
-        NULL },
 
 
     ngx_null_command
@@ -1978,16 +1968,6 @@ write_headers(hmux_msg_t *msg, ngx_http_request_t *r,
                     "Expect", sizeof("Expect"))) {
             /* expect=continue-100 shouldn't be passed to backend */
         } else {
-            if (!strncasecmp((char*)header[i].key.data, "X-Forwarded-For",
-                        sizeof("X-Forwarded-For")))
-            {
-                if ((NGX_CONF_UNSET != hlcf->hmux_set_header_x_forwarded_for )
-                        && (hlcf->hmux_set_header_x_forwarded_for))
-                {
-                    /* dont output X-Forwarded-For here */
-                    continue;
-                }
-            }
 
             rc = hmux_write_string(msg, HMUX_HEADER, &header[i].key);
             if (rc != NGX_OK) {
@@ -2013,25 +1993,6 @@ write_added_headers(hmux_msg_t *msg, ngx_http_request_t *r,
     ngx_str_t                 ctl;
 #endif
     ngx_str_t                 key, value;
-
-    if ( (NGX_CONF_UNSET != hlcf->hmux_set_header_x_forwarded_for )
-            && (hlcf->hmux_set_header_x_forwarded_for))
-    {
-        rc = ngx_hmux_get_x_forwarded_for_value(r, &value, 0);
-        if (NGX_OK != rc) { 
-            return rc;
-        }
-        key.len  = sizeof("X-Forwarded-For") - 1;
-        key.data = (u_char *) "X-Forwarded-For";
-        rc = hmux_write_string(msg, HMUX_HEADER, &key);
-        if (rc != NGX_OK) {
-            return rc;
-        }
-        rc = hmux_write_string(msg, HMUX_STRING, &value);
-        if (rc != NGX_OK) {
-            return rc;
-        }
-    }
 
 #if (NGX_HTTP_SSL)
     if (r->connection->ssl) {   
@@ -2770,7 +2731,6 @@ ngx_hmux_create_loc_conf(ngx_conf_t *cf)
 
     conf->hmux_header_packet_buffer_size_conf = NGX_CONF_UNSET_SIZE;
     conf->max_hmux_data_packet_size_conf = NGX_CONF_UNSET_SIZE;
-    conf->hmux_set_header_x_forwarded_for= NGX_CONF_UNSET;
 
     conf->upstream.store = NGX_CONF_UNSET;
     conf->upstream.store_access = NGX_CONF_UNSET_UINT;
@@ -2845,9 +2805,6 @@ ngx_hmux_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_size_value(conf->max_hmux_data_packet_size_conf,
             prev->max_hmux_data_packet_size_conf,
             (size_t) HMUX_MSG_BUFFER_SZ);
-
-    ngx_conf_merge_value(conf->hmux_set_header_x_forwarded_for,
-            prev->hmux_set_header_x_forwarded_for, 0);
 
     ngx_conf_merge_uint_value(conf->upstream.store_access,
             prev->upstream.store_access, 0600);
@@ -3103,85 +3060,6 @@ ngx_hmux_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     return NGX_CONF_OK;
 }
 
-#if defined(nginx_version) && nginx_version >= 1004000
-static ngx_int_t
-ngx_hmux_get_x_forwarded_for_value(ngx_http_request_t *r,
-        ngx_str_t *v, uintptr_t data)
-{
-    size_t             len;
-    u_char            *p;
-    ngx_uint_t         i, n;
-    ngx_table_elt_t  **h;
-
-    n = r->headers_in.x_forwarded_for.nelts;
-    h = r->headers_in.x_forwarded_for.elts;
-
-    len = 0;
-
-    for (i = 0; i < n; i++) {
-        len += h[i]->value.len + sizeof(", ") - 1;
-    }
-
-    if (len == 0) {
-        v->len = r->connection->addr_text.len;
-        v->data = r->connection->addr_text.data;
-        return NGX_OK;
-    }
-
-    len += r->connection->addr_text.len;
-
-    p = ngx_pnalloc(r->pool, len);
-    if (p == NULL) {
-        return NGX_ERROR;
-    }
-
-    v->len = len;
-    v->data = p;
-
-    for (i = 0; i < n; i++) {
-        p = ngx_copy(p, h[i]->value.data, h[i]->value.len);
-        *p++ = ','; *p++ = ' ';
-    }
-
-    ngx_memcpy(p, r->connection->addr_text.data, r->connection->addr_text.len);
-
-    return NGX_OK;
-
-}
-
-#else
-static ngx_int_t
-ngx_hmux_get_x_forwarded_for_value(ngx_http_request_t *r,
-        ngx_str_t *v, uintptr_t data)
-{   
-    u_char  *p;
-
-    if (r->headers_in.x_forwarded_for == NULL) {
-        v->len = r->connection->addr_text.len;
-        v->data = r->connection->addr_text.data;
-        return NGX_OK;
-    }
-
-    v->len = r->headers_in.x_forwarded_for->value.len
-        + sizeof(", ") - 1 + r->connection->addr_text.len;
-
-    p = ngx_pnalloc(r->pool, v->len);
-    if (p == NULL) {
-        return NGX_ERROR;
-    }
-
-    v->data = p;
-
-    p = ngx_copy(p, r->headers_in.x_forwarded_for->value.data,
-            r->headers_in.x_forwarded_for->value.len);
-
-    *p++ = ','; *p++ = ' ';
-
-    ngx_memcpy(p, r->connection->addr_text.data, r->connection->addr_text.len);
-
-    return NGX_OK;
-}
-#endif
 
 static int
 hmux_log_overflow(ngx_uint_t level, hmux_msg_t *msg, const char *context)

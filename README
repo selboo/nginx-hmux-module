@@ -377,15 +377,6 @@ Directives
     Sets the amount of data that will be flushed to the hmux_temp_path when writing.
     It may be used to prevent a worker process blocking for too long while spooling data.
 
-  hmux_x_forwarded_for
-    syntax: *hmux_x_forwarded_for [ on | off ];*
-
-    default: *hmux_x_forwarded_for off;*
-
-    context: *http, server, location*
-
-    This directive explicitly allows to pass the X-Forwarded-For header to the backend. 
-
   keepalive
     syntax: *keepalive <num> 
 
